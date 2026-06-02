@@ -16,5 +16,6 @@ jobs:
 
       - name: Restart Bot
         run: |
-          sudo systemctl restart EventRelayer
+          sudo systemctl restart lore-relay
+
 
