@@ -63,6 +63,18 @@ class RelayEvents(commands.Cog):
             target_guild.channels,
         )
 
+    def _channel_is_usable(
+        self,
+        guild: discord.Guild,
+        channel: discord.abc.GuildChannel,
+    ) -> bool:
+        me = guild.me
+        if me is None:
+            return False
+
+        perms = channel.permissions_for(me)
+        return perms.view_channel and perms.connect
+
     async def ensure_relay_for_target(
         self,
         target_guild: discord.Guild,
@@ -122,9 +134,9 @@ class RelayEvents(commands.Cog):
         else:
             # voice or stage — try to match channel by name, else first available
             channel = self._find_matching_event_channel(target_guild, event)
-            if channel is None:
+            if channel is None or not self._channel_is_usable(target_guild, channel):
                 log.warning(
-                    "No voice/stage channel in guild %s; falling back to external",
+                    "No usable voice/stage channel in guild %s; falling back to external",
                     target_guild.id,
                 )
                 kwargs["entity_type"] = discord.EntityType.external
@@ -132,6 +144,12 @@ class RelayEvents(commands.Cog):
                     f"#{event.channel.name}" if event.channel else "Watch primary server"
                 )
             else:
+                log.info(
+                    "Using relay channel %s (%s) in guild %s",
+                    channel.name,
+                    channel.id,
+                    target_guild.id,
+                )
                 kwargs["channel"] = channel
 
         if image_data:
