@@ -20,6 +20,7 @@ class Config:
     target_guilds: list[TargetGuild]
     event_name_prefix: str
     reminder_message: str
+    reminder_minutes_before: int
     log_level: str
 
     @classmethod
@@ -31,15 +32,29 @@ class Config:
         if not raw_master:
             raise ValueError("MASTER_GUILD_ID not set in .env")
 
-        target_guilds = [
-            TargetGuild(
-                guild_id=int(g["guild_id"]),
-                reminder_channel_id=int(g["reminder_channel_id"])
-                if g.get("reminder_channel_id")
-                else None,
+        reminder_minutes_before = int(data.get("reminder_minutes_before", 30))
+        if reminder_minutes_before <= 0:
+            raise ValueError("reminder_minutes_before must be greater than 0")
+
+        target_guilds = []
+        seen_guilds: set[int] = set()
+        for raw_guild in data.get("target_guilds") or []:
+            guild_id = int(raw_guild["guild_id"])
+            if guild_id in seen_guilds:
+                raise ValueError(f"Duplicate target guild configured: {guild_id}")
+            seen_guilds.add(guild_id)
+
+            reminder_channel_id = (
+                int(raw_guild["reminder_channel_id"])
+                if raw_guild.get("reminder_channel_id")
+                else None
             )
-            for g in (data.get("target_guilds") or [])
-        ]
+            target_guilds.append(
+                TargetGuild(
+                    guild_id=guild_id,
+                    reminder_channel_id=reminder_channel_id,
+                )
+            )
 
         return cls(
             master_guild_id=int(raw_master),
@@ -49,6 +64,7 @@ class Config:
                 "reminder_message",
                 "⏰ O evento **{event_name}** começa em 30 minutos! {mentions}",
             ),
+            reminder_minutes_before=reminder_minutes_before,
             log_level=data.get("log_level", "INFO"),
         )
 

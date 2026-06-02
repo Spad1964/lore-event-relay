@@ -42,19 +42,25 @@ class Database:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
                 """
-                INSERT OR REPLACE INTO event_relay
+                INSERT INTO event_relay
                     (master_event_id, guild_id, relay_event_id, reminded)
                 VALUES (?, ?, ?, 0)
+                ON CONFLICT(master_event_id, guild_id) DO UPDATE SET
+                    relay_event_id = excluded.relay_event_id
                 """,
                 (str(master_event_id), str(guild_id), str(relay_event_id)),
             )
             await db.commit()
 
-    async def mark_reminded(self, master_event_id: int) -> None:
+    async def mark_reminded(self, master_event_id: int, guild_id: int) -> None:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
-                "UPDATE event_relay SET reminded = 1 WHERE master_event_id = ?",
-                (str(master_event_id),),
+                """
+                UPDATE event_relay
+                SET reminded = 1
+                WHERE master_event_id = ? AND guild_id = ?
+                """,
+                (str(master_event_id), str(guild_id)),
             )
             await db.commit()
 
@@ -97,12 +103,25 @@ class Database:
                 row = await cur.fetchone()
                 return int(row[0]) if row else None
 
-    async def get_unreminded_events(self) -> list[dict]:
-        """Return distinct master_event_ids not yet reminded."""
+    async def mark_all_reminded(self, master_event_id: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE event_relay SET reminded = 1 WHERE master_event_id = ?",
+                (str(master_event_id),),
+            )
+            await db.commit()
+
+    async def get_unreminded_relays(self) -> list[dict]:
+        """Return relay rows that have not received reminders yet."""
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT DISTINCT master_event_id FROM event_relay WHERE reminded = 0"
+                """
+                SELECT *
+                FROM event_relay
+                WHERE reminded = 0
+                ORDER BY master_event_id, guild_id
+                """
             ) as cur:
                 return [dict(r) for r in await cur.fetchall()]
 

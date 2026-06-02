@@ -30,6 +30,54 @@ class RelayEvents(commands.Cog):
     def is_master_event(self, event: discord.ScheduledEvent) -> bool:
         return event.guild_id == self.bot.config.master_guild_id
 
+    def _find_matching_event_channel(
+        self,
+        target_guild: discord.Guild,
+        event: discord.ScheduledEvent,
+    ) -> Optional[discord.abc.GuildChannel]:
+        if event.channel:
+            channel = discord.utils.get(
+                target_guild.channels,
+                name=event.channel.name,
+                type=event.channel.type,
+            )
+            if channel:
+                return channel
+
+        return discord.utils.find(
+            lambda c: isinstance(c, (discord.VoiceChannel, discord.StageChannel)),
+            target_guild.channels,
+        )
+
+    async def ensure_relay_for_target(
+        self,
+        target_guild: discord.Guild,
+        event: discord.ScheduledEvent,
+    ) -> bool:
+        existing_id = await self.bot.db.get_relay_event_id(event.id, target_guild.id)
+        if existing_id:
+            try:
+                await target_guild.fetch_scheduled_event(existing_id)
+                return False
+            except discord.NotFound:
+                log.warning(
+                    "Relay event %s missing from guild %s; recreating",
+                    existing_id, target_guild.id,
+                )
+                await self.bot.db.delete_relay(event.id, target_guild.id)
+            except discord.HTTPException as exc:
+                log.warning(
+                    "Could not verify relay %s in guild %s: %s",
+                    existing_id, target_guild.id, exc,
+                )
+                return False
+
+        relay = await self.create_relay_event(target_guild, event)
+        if relay:
+            await self.bot.db.add_relay(event.id, target_guild.id, relay.id)
+            return True
+        return False
+
     # ── Create relay ─────────────────────────────────────────────────────────
 
     async def create_relay_event(
@@ -59,16 +107,7 @@ class RelayEvents(commands.Cog):
             kwargs["location"] = event.location or "Ver servidor principal"
         else:
             # voice or stage — try to match channel by name, else first available
-            channel = None
-            if event.channel:
-                channel = discord.utils.get(
-                    target_guild.channels, name=event.channel.name
-                )
-            if channel is None:
-                channel = discord.utils.find(
-                    lambda c: isinstance(c, (discord.VoiceChannel, discord.StageChannel)),
-                    target_guild.channels,
-                )
+            channel = self._find_matching_event_channel(target_guild, event)
             if channel is None:
                 log.warning(
                     "No voice/stage channel in guild %s; falling back to external",
@@ -121,20 +160,16 @@ class RelayEvents(commands.Cog):
                 continue
 
             for target_cfg in self.bot.config.target_guilds:
-                existing = await self.bot.db.get_relay_event_id(
-                    event.id, target_cfg.guild_id
-                )
-                if existing:
-                    continue
-
                 target_guild = self.bot.get_guild(target_cfg.guild_id)
                 if not target_guild:
                     log.warning("Target guild %s not found", target_cfg.guild_id)
                     continue
 
-                relay = await self.create_relay_event(target_guild, event)
-                if relay:
-                    await self.bot.db.add_relay(event.id, target_guild.id, relay.id)
+                created_relay = await self.ensure_relay_for_target(
+                    target_guild,
+                    event,
+                )
+                if created_relay:
                     created += 1
 
                 await asyncio.sleep(0.5)
@@ -161,9 +196,7 @@ class RelayEvents(commands.Cog):
                 log.warning("Target guild %s not available", target_cfg.guild_id)
                 continue
 
-            relay = await self.create_relay_event(target_guild, event)
-            if relay:
-                await self.bot.db.add_relay(event.id, target_guild.id, relay.id)
+            await self.ensure_relay_for_target(target_guild, event)
 
             await asyncio.sleep(0.5)
 
@@ -206,6 +239,23 @@ class RelayEvents(commands.Cog):
                 await self.bot.db.delete_relay(after.id, guild.id)
                 continue
 
+            cover_removed = before.cover_image is not None and after.cover_image is None
+            if cover_removed or relay_event.entity_type != after.entity_type:
+                try:
+                    await relay_event.delete()
+                except discord.NotFound:
+                    pass
+                except discord.Forbidden:
+                    log.error("Missing permissions to recreate event in guild %s", guild.id)
+                    continue
+                except discord.HTTPException as exc:
+                    log.error("HTTP error recreating event in guild %s: %s", guild.id, exc)
+                    continue
+                await self.bot.db.delete_relay(after.id, guild.id)
+                await self.ensure_relay_for_target(guild, after)
+                await asyncio.sleep(0.5)
+                continue
+
             edit_kwargs: dict = dict(
                 name=f"{self.bot.config.event_name_prefix}{after.name}",
                 description=after.description or "",
@@ -214,6 +264,10 @@ class RelayEvents(commands.Cog):
             )
             if after.entity_type == discord.EntityType.external:
                 edit_kwargs["location"] = after.location or "Watch primary server"
+            else:
+                channel = self._find_matching_event_channel(guild, after)
+                if channel:
+                    edit_kwargs["channel"] = channel
             if image_data:
                 edit_kwargs["image"] = image_data
 

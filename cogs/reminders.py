@@ -7,7 +7,6 @@ from discord.ext import commands, tasks
 log = logging.getLogger(__name__)
 
 _WINDOW_MINUTES = 1  # check every minute
-_REMIND_BEFORE = 30  # minutes before event start
 _TOLERANCE = 1       # ± tolerance in minutes for the trigger window
 
 
@@ -22,23 +21,25 @@ class Reminders(commands.Cog):
     @tasks.loop(minutes=_WINDOW_MINUTES)
     async def reminder_task(self) -> None:
         now = datetime.now(timezone.utc)
-        window_start = now + timedelta(minutes=_REMIND_BEFORE - _TOLERANCE)
-        window_end = now + timedelta(minutes=_REMIND_BEFORE + _TOLERANCE)
+        reminder_minutes = self.bot.config.reminder_minutes_before
+        window_start = now + timedelta(minutes=reminder_minutes - _TOLERANCE)
+        window_end = now + timedelta(minutes=reminder_minutes + _TOLERANCE)
 
         master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
         if not master_guild:
             return
 
-        unreminded = await self.bot.db.get_unreminded_events()
+        unreminded_relays = await self.bot.db.get_unreminded_relays()
+        grouped: dict[int, list[dict]] = {}
+        for row in unreminded_relays:
+            grouped.setdefault(int(row["master_event_id"]), []).append(row)
 
-        for row in unreminded:
-            master_event_id = int(row["master_event_id"])
-
+        for master_event_id, relay_rows in grouped.items():
             try:
                 event = await master_guild.fetch_scheduled_event(master_event_id)
             except discord.NotFound:
-                # Event gone — mark so we never check it again
-                await self.bot.db.mark_reminded(master_event_id)
+                # Event gone - mark so we never check it again.
+                await self.bot.db.mark_all_reminded(master_event_id)
                 continue
             except discord.HTTPException as exc:
                 log.warning("Could not fetch event %s: %s", master_event_id, exc)
@@ -60,20 +61,23 @@ class Reminders(commands.Cog):
 
             mentions_str = " ".join(mentions)
 
-            await self._send_reminders(event, master_event_id, mentions_str)
-            await self.bot.db.mark_reminded(master_event_id)
+            await self._send_reminders(event, master_event_id, mentions_str, relay_rows)
 
     async def _send_reminders(
         self,
         event: discord.ScheduledEvent,
         master_event_id: int,
         mentions_str: str,
+        relay_rows: list[dict] | None = None,
+        mark_sent: bool = True,
     ) -> None:
-        relays = await self.bot.db.get_relays_for_master(master_event_id)
+        relays = relay_rows or await self.bot.db.get_relays_for_master(master_event_id)
 
         for row in relays:
             target_cfg = self.bot.config.get_target_guild(int(row["guild_id"]))
             if not target_cfg or not target_cfg.reminder_channel_id:
+                if mark_sent:
+                    await self.bot.db.mark_reminded(master_event_id, int(row["guild_id"]))
                 continue
 
             channel = self.bot.get_channel(target_cfg.reminder_channel_id)
@@ -86,14 +90,22 @@ class Reminders(commands.Cog):
                 )
                 continue
 
+            content = self.bot.config.reminder_message.format(
+                event_name=event.name,
+                mentions=mentions_str,
+                minutes=self.bot.config.reminder_minutes_before,
+            ).strip()
+
             # Build embed
             embed = discord.Embed(
-                title=f"⏰ {event.name}",
+                title=event.name,
                 description=event.description or "",
                 color=discord.Color.orange(),
                 timestamp=event.start_time,
             )
-            embed.set_footer(text="Começa em 30 minutos")
+            embed.set_footer(
+                text=f"Starts in {self.bot.config.reminder_minutes_before} minutes"
+            )
 
             # Link to the relay event in that guild
             try:
@@ -124,9 +136,11 @@ class Reminders(commands.Cog):
 
             try:
                 await channel.send(
-                    content=mentions_str or None,
+                    content=content or None,
                     embed=embed,
                 )
+                if mark_sent:
+                    await self.bot.db.mark_reminded(master_event_id, int(row["guild_id"]))
                 log.info(
                     "Sent reminder for event %s to guild %s",
                     master_event_id, row["guild_id"],

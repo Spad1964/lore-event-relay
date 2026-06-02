@@ -59,6 +59,11 @@ class Admin(commands.Cog):
             value=f"`{self.bot.config.event_name_prefix}`",
             inline=True,
         )
+        embed.add_field(
+            name="Reminder",
+            value=f"{self.bot.config.reminder_minutes_before} minutes before",
+            inline=True,
+        )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -167,15 +172,77 @@ class Admin(commands.Cog):
                     skipped += 1
                     continue
 
-                relay = await relay_cog.create_relay_event(target_guild, event)
-                if relay:
-                    await self.bot.db.add_relay(event.id, target_guild.id, relay.id)
+                created_relay = await relay_cog.ensure_relay_for_target(
+                    target_guild,
+                    event,
+                )
+                if created_relay:
                     created += 1
                 else:
                     skipped += 1
 
         await interaction.followup.send(
             f"Sync finished: **{created}** created, **{skipped}** ignored.",
+            ephemeral=True,
+        )
+
+    # ── /relay repair ────────────────────────────────────────────────────────
+
+    @relay.command(
+        name="repair",
+        description="Verify relay events and recreate missing copies",
+    )
+    async def repair(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
+        if not master_guild:
+            await interaction.followup.send(
+                "Master guild not found.", ephemeral=True
+            )
+            return
+
+        relay_cog = self.bot.get_cog("RelayEvents")
+        if not relay_cog:
+            await interaction.followup.send(
+                "Relay cog not loaded.", ephemeral=True
+            )
+            return
+
+        try:
+            events = await master_guild.fetch_scheduled_events()
+        except discord.HTTPException as exc:
+            await interaction.followup.send(
+                f"Error getting events: {exc}", ephemeral=True
+            )
+            return
+
+        active_events = [
+            event
+            for event in events
+            if event.status
+            not in (discord.EventStatus.completed, discord.EventStatus.cancelled)
+        ]
+
+        repaired = skipped = 0
+        for event in active_events:
+            for target_cfg in self.bot.config.target_guilds:
+                target_guild = self.bot.get_guild(target_cfg.guild_id)
+                if not target_guild:
+                    skipped += 1
+                    continue
+
+                created_relay = await relay_cog.ensure_relay_for_target(
+                    target_guild,
+                    event,
+                )
+                if created_relay:
+                    repaired += 1
+                else:
+                    skipped += 1
+
+        await interaction.followup.send(
+            f"Repair finished: **{repaired}** recreated, **{skipped}** already OK or skipped.",
             ephemeral=True,
         )
 
@@ -257,7 +324,12 @@ class Admin(commands.Cog):
         except Exception as exc:
             log.warning("Could not fetch participants: %s", exc)
 
-        await reminder_cog._send_reminders(event, int(master_event_id), " ".join(mentions))
+        await reminder_cog._send_reminders(
+            event,
+            int(master_event_id),
+            " ".join(mentions),
+            mark_sent=False,
+        )
         await interaction.followup.send("Reminder sent.", ephemeral=True)
 
 

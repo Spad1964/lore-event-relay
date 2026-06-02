@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -52,6 +53,8 @@ class LoreRelayBot(commands.Bot):
 
         self.config = config
         self.db = Database("events.db")
+        self._startup_synced = False
+        self._startup_sync_lock = asyncio.Lock()
 
     async def setup_hook(self) -> None:
         await self.db.init()
@@ -64,16 +67,22 @@ class LoreRelayBot(commands.Bot):
         log.info("Slash commands synced")
 
     async def on_ready(self) -> None:
-        log.info(f"Bot online: {self.user} (ID: {self.user.id})")
+        user_id: Optional[int] = self.user.id if self.user else None
+        log.info(f"Bot online: {self.user} (ID: {user_id})")
         log.info(f"Master guild: {self.config.master_guild_id}")
         log.info(
             f"Target guilds: {[g.guild_id for g in self.config.target_guilds]}"
         )
 
         # Startup sync: create missing relays for events that appeared while offline
-        relay_cog = self.get_cog("RelayEvents")
-        if relay_cog:
-            await relay_cog.startup_sync()
+        async with self._startup_sync_lock:
+            if self._startup_synced:
+                return
+
+            relay_cog = self.get_cog("RelayEvents")
+            if relay_cog:
+                await relay_cog.startup_sync()
+                self._startup_synced = True
 
     async def on_error(self, event_method: str, *args, **kwargs) -> None:
         log.exception(f"Unhandled error in {event_method}")

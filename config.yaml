@@ -1,14 +1,15 @@
 target_guilds:
   # Staff Server
-  - guild_id: "956715627589013576"
-    reminder_channel_id: "1477819480049713324"
+  # - guild_id: "956715627589013576"
+  #   reminder_channel_id: "1477819480049713324"
   # Lore Actor Server
   - guild_id: "1374811059017486356"
     reminder_channel_id: "1374814370256781442"
 
 event_name_prefix: "[PD] - "
 
-# {event_name} and {mentions} are replaced at runtime
-reminder_message: "The event **{event_name}** starts in 30 minutes! {mentions}"
+# {event_name}, {mentions}, and {minutes} are replaced at runtime
+reminder_minutes_before: 30
+reminder_message: "The event **{event_name}** starts in {minutes} minutes! {mentions}"
 
 log_level: "INFO"
