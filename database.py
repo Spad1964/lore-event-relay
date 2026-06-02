@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 import aiosqlite
@@ -28,6 +29,23 @@ class Database:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_relay ON event_relay(relay_event_id)"
             )
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at      TEXT    NOT NULL,
+                    action          TEXT    NOT NULL,
+                    master_event_id TEXT,
+                    guild_id        TEXT,
+                    relay_event_id  TEXT,
+                    details         TEXT
+                )
+            """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)"
+            )
             await db.commit()
         log.info("Database ready: %s", self.path)
 
@@ -49,6 +67,33 @@ class Database:
                     relay_event_id = excluded.relay_event_id
                 """,
                 (str(master_event_id), str(guild_id), str(relay_event_id)),
+            )
+            await db.commit()
+
+    async def record_audit(
+        self,
+        action: str,
+        *,
+        master_event_id: int | None = None,
+        guild_id: int | None = None,
+        relay_event_id: int | None = None,
+        details: str | None = None,
+    ) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """
+                INSERT INTO audit_log
+                    (created_at, action, master_event_id, guild_id, relay_event_id, details)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    action,
+                    str(master_event_id) if master_event_id is not None else None,
+                    str(guild_id) if guild_id is not None else None,
+                    str(relay_event_id) if relay_event_id is not None else None,
+                    details,
+                ),
             )
             await db.commit()
 
@@ -130,5 +175,19 @@ class Database:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM event_relay ORDER BY master_event_id"
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    async def get_recent_audit_logs(self, limit: int = 20) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT *
+                FROM audit_log
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
             ) as cur:
                 return [dict(r) for r in await cur.fetchall()]

@@ -12,6 +12,37 @@ class Admin(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
 
+    def _guild_permission_summary(self, guild: discord.Guild) -> str:
+        me = guild.me
+        if me is None:
+            return "bot member not cached"
+
+        perms = me.guild_permissions
+        return (
+            f"manage_events={perms.manage_events}, "
+            f"view_channel={perms.view_channel}, "
+            f"send_messages={perms.send_messages}, "
+            f"connect={perms.connect}, "
+            f"speak={perms.speak}"
+        )
+
+    def _format_audit_entry(self, row: dict) -> str:
+        details = row.get("details") or ""
+        parts = [row.get("created_at", "?")]
+        if row.get("action"):
+            parts.append(row["action"])
+        if row.get("status"):
+            parts.append(row["status"])
+        if row.get("guild_id"):
+            parts.append(f"guild={row['guild_id']}")
+        if row.get("master_event_id"):
+            parts.append(f"master={row['master_event_id']}")
+        if row.get("relay_event_id"):
+            parts.append(f"relay={row['relay_event_id']}")
+        if details:
+            parts.append(details)
+        return " | ".join(parts)
+
     relay = app_commands.Group(
         name="relay",
         description="Lore Event Relay management",
@@ -124,7 +155,12 @@ class Admin(commands.Cog):
         name="sync",
         description="Create missing relays for existing master events",
     )
-    async def sync_events(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(dry_run="Preview the changes without creating relays")
+    async def sync_events(
+        self,
+        interaction: discord.Interaction,
+        dry_run: bool = False,
+    ) -> None:
         await interaction.response.defer(ephemeral=True)
 
         master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
@@ -141,48 +177,15 @@ class Admin(commands.Cog):
             )
             return
 
-        try:
-            events = await master_guild.fetch_scheduled_events()
-        except discord.HTTPException as exc:
-            await interaction.followup.send(
-                f"Error getting events: {exc}", ephemeral=True
-            )
-            return
-
-        created = skipped = 0
-
-        for event in events:
-            if event.status in (
-                discord.EventStatus.completed,
-                discord.EventStatus.cancelled,
-            ):
-                skipped += 1
-                continue
-
-            for target_cfg in self.bot.config.target_guilds:
-                existing = await self.bot.db.get_relay_event_id(
-                    event.id, target_cfg.guild_id
-                )
-                if existing:
-                    skipped += 1
-                    continue
-
-                target_guild = self.bot.get_guild(target_cfg.guild_id)
-                if not target_guild:
-                    skipped += 1
-                    continue
-
-                created_relay = await relay_cog.ensure_relay_for_target(
-                    target_guild,
-                    event,
-                )
-                if created_relay:
-                    created += 1
-                else:
-                    skipped += 1
+        created = await relay_cog.sync_missing_relays(dry_run=dry_run)
+        skipped = 0
 
         await interaction.followup.send(
-            f"Sync finished: **{created}** created, **{skipped}** ignored.",
+            (
+                f"Sync dry-run: **{created}** relay(s) would be created."
+                if dry_run
+                else f"Sync finished: **{created}** created."
+            ),
             ephemeral=True,
         )
 
@@ -192,7 +195,12 @@ class Admin(commands.Cog):
         name="repair",
         description="Verify relay events and recreate missing copies",
     )
-    async def repair(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(dry_run="Preview the changes without recreating relays")
+    async def repair(
+        self,
+        interaction: discord.Interaction,
+        dry_run: bool = False,
+    ) -> None:
         await interaction.response.defer(ephemeral=True)
 
         master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
@@ -209,40 +217,14 @@ class Admin(commands.Cog):
             )
             return
 
-        try:
-            events = await master_guild.fetch_scheduled_events()
-        except discord.HTTPException as exc:
-            await interaction.followup.send(
-                f"Error getting events: {exc}", ephemeral=True
-            )
-            return
-
-        active_events = [
-            event
-            for event in events
-            if event.status
-            not in (discord.EventStatus.completed, discord.EventStatus.cancelled)
-        ]
-
-        repaired = skipped = 0
-        for event in active_events:
-            for target_cfg in self.bot.config.target_guilds:
-                target_guild = self.bot.get_guild(target_cfg.guild_id)
-                if not target_guild:
-                    skipped += 1
-                    continue
-
-                created_relay = await relay_cog.ensure_relay_for_target(
-                    target_guild,
-                    event,
-                )
-                if created_relay:
-                    repaired += 1
-                else:
-                    skipped += 1
+        repaired = await relay_cog.repair_missing_relays(dry_run=dry_run)
 
         await interaction.followup.send(
-            f"Repair finished: **{repaired}** recreated, **{skipped}** already OK or skipped.",
+            (
+                f"Repair dry-run: **{repaired}** relay(s) would be recreated."
+                if dry_run
+                else f"Repair finished: **{repaired}** recreated."
+            ),
             ephemeral=True,
         )
 
@@ -252,7 +234,12 @@ class Admin(commands.Cog):
         name="cleanup",
         description="Remove DB entries for events that no longer exist",
     )
-    async def cleanup(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(dry_run="Preview the changes without deleting records")
+    async def cleanup(
+        self,
+        interaction: discord.Interaction,
+        dry_run: bool = False,
+    ) -> None:
         await interaction.response.defer(ephemeral=True)
 
         master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
@@ -275,13 +262,108 @@ class Admin(commands.Cog):
             try:
                 await master_guild.fetch_scheduled_event(mid)
             except discord.NotFound:
-                await self.bot.db.delete_relays_for_master(mid)
+                if not dry_run:
+                    await self.bot.db.delete_relays_for_master(mid)
                 removed += 1
 
         await interaction.followup.send(
-            f"Cleanup: removed entries, **{removed}** event(s) delete(d).",
+            (
+                f"Cleanup dry-run: **{removed}** master event(s) would be removed."
+                if dry_run
+                else f"Cleanup: removed entries for **{removed}** master event(s)."
+            ),
             ephemeral=True,
         )
+
+    # ── /relay health ────────────────────────────────────────────────────────
+
+    @relay.command(
+        name="health",
+        description="Show bot, guild, and database health for the relay system",
+    )
+    async def health(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        embed = discord.Embed(
+            title="Relay Health",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        bot_user = self.bot.user
+        embed.add_field(
+            name="Bot",
+            value=(
+                f"{bot_user} | ready={self.bot.is_ready()} | latency={round(self.bot.latency * 1000)}ms"
+                if bot_user
+                else f"ready={self.bot.is_ready()} | latency={round(self.bot.latency * 1000)}ms"
+            ),
+            inline=False,
+        )
+
+        master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
+        embed.add_field(
+            name="Master Guild",
+            value=(
+                f"**{master_guild.name}** (`{master_guild.id}`)"
+                if master_guild
+                else f"Not found (`{self.bot.config.master_guild_id}`)"
+            ),
+            inline=False,
+        )
+
+        target_lines = []
+        for target in self.bot.config.target_guilds:
+            guild = self.bot.get_guild(target.guild_id)
+            if guild:
+                target_lines.append(
+                    f"• **{guild.name}** (`{guild.id}`) — {self._guild_permission_summary(guild)}"
+                )
+            else:
+                target_lines.append(f"• Not found (`{target.guild_id}`)")
+
+        embed.add_field(
+            name=f"Target Guilds ({len(self.bot.config.target_guilds)})",
+            value="\n".join(target_lines) if target_lines else "None configured",
+            inline=False,
+        )
+
+        relays = await self.bot.db.get_all_relays()
+        audit_rows = await self.bot.db.get_recent_audit_logs(limit=5)
+        embed.add_field(name="Relay Rows", value=str(len(relays)), inline=True)
+        embed.add_field(name="Audit Entries", value=str(len(audit_rows)), inline=True)
+
+        if audit_rows:
+            embed.add_field(
+                name="Latest Audit",
+                value="\n".join(self._format_audit_entry(row) for row in audit_rows[:3]),
+                inline=False,
+            )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── /relay audit ─────────────────────────────────────────────────────────
+
+    @relay.command(name="audit", description="Show recent relay audit entries")
+    @app_commands.describe(limit="How many recent entries to show")
+    async def audit(self, interaction: discord.Interaction, limit: int = 10) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        limit = max(1, min(limit, 25))
+        rows = await self.bot.db.get_recent_audit_logs(limit=limit)
+
+        if not rows:
+            await interaction.followup.send("No audit entries found.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="Relay Audit",
+            color=discord.Color.dark_teal(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.description = "\n".join(self._format_audit_entry(row) for row in rows)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── /relay remind_test ───────────────────────────────────────────────────
 

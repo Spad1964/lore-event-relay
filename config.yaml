@@ -9,7 +9,7 @@ target_guilds:
 event_name_prefix: "[PD] - "
 
 # {event_name}, {mentions}, and {minutes} are replaced at runtime
-reminder_minutes_before: 15
+reminder_minutes_before: 5
 reminder_message: "The event **{event_name}** starts in {minutes} minutes! {mentions}"
 
 log_level: "INFO"

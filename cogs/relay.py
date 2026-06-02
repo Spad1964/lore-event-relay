@@ -3,9 +3,11 @@ import logging
 from typing import Optional
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 log = logging.getLogger(__name__)
+
+AUTO_REPAIR_MINUTES = 30
 
 
 def _is_meaningful_update(
@@ -18,7 +20,11 @@ def _is_meaningful_update(
         or before.start_time != after.start_time
         or before.end_time != after.end_time
         or before.location != after.location
-        or (before.cover_image and after.cover_image and before.cover_image.url != after.cover_image.url)
+        or (
+            before.cover_image
+            and after.cover_image
+            and before.cover_image.url != after.cover_image.url
+        )
         or (before.cover_image is None) != (after.cover_image is None)
     )
 
@@ -26,6 +32,10 @@ def _is_meaningful_update(
 class RelayEvents(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
+        self.auto_repair_task.start()
+
+    def cog_unload(self) -> None:
+        self.auto_repair_task.cancel()
 
     def _log_guild_permissions(self, guild: discord.Guild) -> str:
         me = guild.me
@@ -39,6 +49,23 @@ class RelayEvents(commands.Cog):
             f"send_messages={perms.send_messages}, "
             f"connect={perms.connect}, "
             f"speak={perms.speak}"
+        )
+
+    def _log_channel_permissions(
+        self,
+        guild: discord.Guild,
+        channel: discord.abc.GuildChannel,
+    ) -> str:
+        me = guild.me
+        if me is None:
+            return "bot member not cached"
+
+        perms = channel.permissions_for(me)
+        return (
+            f"view_channel={perms.view_channel}, "
+            f"connect={perms.connect}, "
+            f"speak={perms.speak}, "
+            f"manage_channels={perms.manage_channels}"
         )
 
     def is_master_event(self, event: discord.ScheduledEvent) -> bool:
@@ -79,29 +106,54 @@ class RelayEvents(commands.Cog):
         self,
         target_guild: discord.Guild,
         event: discord.ScheduledEvent,
+        *,
+        dry_run: bool = False,
     ) -> bool:
         existing_id = await self.bot.db.get_relay_event_id(event.id, target_guild.id)
+        repairing = False
+
         if existing_id:
             try:
                 await target_guild.fetch_scheduled_event(existing_id)
                 return False
             except discord.NotFound:
+                repairing = True
                 log.warning(
                     "Relay event %s missing from guild %s; recreating",
-                    existing_id, target_guild.id,
+                    existing_id,
+                    target_guild.id,
                 )
+                if dry_run:
+                    return True
                 await self.bot.db.delete_relay(event.id, target_guild.id)
             except discord.HTTPException as exc:
                 log.warning(
                     "Could not verify relay %s in guild %s: %s",
-                    existing_id, target_guild.id, exc,
+                    existing_id,
+                    target_guild.id,
+                    exc,
                 )
                 return False
+
+        if dry_run:
+            return True
 
         relay = await self.create_relay_event(target_guild, event)
         if relay:
             await self.bot.db.add_relay(event.id, target_guild.id, relay.id)
+            await self.bot.db.log_audit(
+                "relay_repaired" if repairing else "relay_created",
+                master_event_id=event.id,
+                guild_id=target_guild.id,
+                relay_event_id=relay.id,
+                details=(
+                    "recreated missing relay"
+                    if repairing
+                    else "created relay"
+                ),
+            )
             return True
+
         return False
 
     # ── Create relay ─────────────────────────────────────────────────────────
@@ -118,7 +170,11 @@ class RelayEvents(commands.Cog):
             try:
                 image_data = await event.cover_image.read()
             except Exception as exc:
-                log.warning("Could not fetch cover image for event %s: %s", event.id, exc)
+                log.warning(
+                    "Could not fetch cover image for event %s: %s",
+                    event.id,
+                    exc,
+                )
 
         kwargs: dict = dict(
             name=name,
@@ -132,11 +188,10 @@ class RelayEvents(commands.Cog):
         if event.entity_type == discord.EntityType.external:
             kwargs["location"] = event.location or "Ver servidor principal"
         else:
-            # voice or stage — try to match channel by name, else first available
             channel = self._find_matching_event_channel(target_guild, event)
-            if channel is None or not self._channel_is_usable(target_guild, channel):
+            if channel is None:
                 log.warning(
-                    "No usable voice/stage channel in guild %s; falling back to external",
+                    "No voice/stage channel in guild %s; falling back to external",
                     target_guild.id,
                 )
                 kwargs["entity_type"] = discord.EntityType.external
@@ -144,13 +199,25 @@ class RelayEvents(commands.Cog):
                     f"#{event.channel.name}" if event.channel else "Watch primary server"
                 )
             else:
-                log.info(
-                    "Using relay channel %s (%s) in guild %s",
-                    channel.name,
-                    channel.id,
-                    target_guild.id,
-                )
-                kwargs["channel"] = channel
+                if not self._channel_is_usable(target_guild, channel):
+                    log.warning(
+                        "Matched channel %s in guild %s is not usable (%s); falling back to external",
+                        channel.id,
+                        target_guild.id,
+                        self._log_channel_permissions(target_guild, channel),
+                    )
+                    kwargs["entity_type"] = discord.EntityType.external
+                    kwargs["location"] = (
+                        f"#{event.channel.name}" if event.channel else "Watch primary server"
+                    )
+                else:
+                    log.info(
+                        "Using relay channel %s (%s) in guild %s",
+                        channel.name,
+                        channel.id,
+                        target_guild.id,
+                    )
+                    kwargs["channel"] = channel
 
         if image_data:
             kwargs["image"] = image_data
@@ -159,7 +226,9 @@ class RelayEvents(commands.Cog):
             relay = await target_guild.create_scheduled_event(**kwargs)
             log.info(
                 "Created relay %s in guild %s for master event %s",
-                relay.id, target_guild.id, event.id,
+                relay.id,
+                target_guild.id,
+                event.id,
             )
             return relay
         except discord.Forbidden as exc:
@@ -169,24 +238,50 @@ class RelayEvents(commands.Cog):
                 self._log_guild_permissions(target_guild),
                 exc,
             )
+            await self.bot.db.log_audit(
+                "relay_create_failed",
+                master_event_id=event.id,
+                guild_id=target_guild.id,
+                details=(
+                    f"forbidden while creating {event.entity_type.name} relay; "
+                    f"guild_perms={self._log_guild_permissions(target_guild)}"
+                ),
+            )
         except discord.HTTPException as exc:
-            log.error("HTTP error creating event in guild %s: %s", target_guild.id, exc)
+            log.error(
+                "HTTP error creating event in guild %s: %s",
+                target_guild.id,
+                exc,
+            )
+            await self.bot.db.log_audit(
+                "relay_create_failed",
+                master_event_id=event.id,
+                guild_id=target_guild.id,
+                details=f"http error while creating relay: {exc}",
+            )
         return None
 
     # ── Startup sync ─────────────────────────────────────────────────────────
 
     async def startup_sync(self) -> None:
         """Create missing relay entries for events that appeared while bot was offline."""
+        created = await self.sync_missing_relays()
+        if created:
+            log.info("Startup sync created %d missing relay(s)", created)
+        else:
+            log.info("Startup sync: all events already relayed")
+
+    async def sync_missing_relays(self, *, dry_run: bool = False) -> int:
         master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
         if not master_guild:
             log.warning("Master guild not found during startup sync")
-            return
+            return 0
 
         try:
             events = await master_guild.fetch_scheduled_events()
         except discord.HTTPException as exc:
             log.error("Could not fetch master guild events on startup: %s", exc)
-            return
+            return 0
 
         created = 0
         for event in events:
@@ -202,6 +297,16 @@ class RelayEvents(commands.Cog):
                     log.warning("Target guild %s not found", target_cfg.guild_id)
                     continue
 
+                existing_id = await self.bot.db.get_relay_event_id(
+                    event.id, target_guild.id
+                )
+                if existing_id:
+                    continue
+
+                if dry_run:
+                    created += 1
+                    continue
+
                 created_relay = await self.ensure_relay_for_target(
                     target_guild,
                     event,
@@ -211,10 +316,60 @@ class RelayEvents(commands.Cog):
 
                 await asyncio.sleep(0.5)
 
-        if created:
-            log.info("Startup sync created %d missing relay(s)", created)
+        if dry_run:
+            log.info("Dry-run sync would create %d relay(s)", created)
         else:
-            log.info("Startup sync: all events already relayed")
+            log.info("Sync created %d missing relay(s)", created)
+        return created
+
+    async def repair_missing_relays(self, *, dry_run: bool = False) -> int:
+        master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
+        if not master_guild:
+            log.warning("Master guild not found during repair pass")
+            return 0
+
+        try:
+            events = await master_guild.fetch_scheduled_events()
+        except discord.HTTPException as exc:
+            log.error("Could not fetch master guild events during repair: %s", exc)
+            return 0
+
+        repaired = 0
+        for event in events:
+            if event.status in (
+                discord.EventStatus.completed,
+                discord.EventStatus.cancelled,
+            ):
+                continue
+
+            for target_cfg in self.bot.config.target_guilds:
+                target_guild = self.bot.get_guild(target_cfg.guild_id)
+                if not target_guild:
+                    log.warning("Target guild %s not found", target_cfg.guild_id)
+                    continue
+
+                if await self.ensure_relay_for_target(
+                    target_guild,
+                    event,
+                    dry_run=dry_run,
+                ):
+                    repaired += 1
+
+                await asyncio.sleep(0.5)
+
+        if dry_run:
+            log.info("Dry-run repair would recreate %d relay(s)", repaired)
+        else:
+            log.info("Repair recreated %d missing relay(s)", repaired)
+        return repaired
+
+    @tasks.loop(minutes=AUTO_REPAIR_MINUTES)
+    async def auto_repair_task(self) -> None:
+        await self.repair_missing_relays()
+
+    @auto_repair_task.before_loop
+    async def before_auto_repair(self) -> None:
+        await self.bot.wait_until_ready()
 
     # ── Listeners ────────────────────────────────────────────────────────────
 
@@ -271,9 +426,17 @@ class RelayEvents(commands.Cog):
             except discord.NotFound:
                 log.warning(
                     "Relay event %s gone from guild %s; removing from DB",
-                    row["relay_event_id"], guild.id,
+                    row["relay_event_id"],
+                    guild.id,
                 )
                 await self.bot.db.delete_relay(after.id, guild.id)
+                await self.bot.db.log_audit(
+                    "relay_missing",
+                    master_event_id=after.id,
+                    guild_id=guild.id,
+                    relay_event_id=int(row["relay_event_id"]),
+                    details="relay disappeared before update could be applied",
+                )
                 continue
 
             cover_removed = before.cover_image is not None and after.cover_image is None
@@ -283,11 +446,34 @@ class RelayEvents(commands.Cog):
                 except discord.NotFound:
                     pass
                 except discord.Forbidden:
-                    log.error("Missing permissions to recreate event in guild %s", guild.id)
+                    log.error(
+                        "Missing permissions to recreate event in guild %s (%s)",
+                        guild.id,
+                        self._log_guild_permissions(guild),
+                    )
+                    await self.bot.db.log_audit(
+                        "relay_update_failed",
+                        master_event_id=after.id,
+                        guild_id=guild.id,
+                        relay_event_id=relay_event.id,
+                        details="forbidden while deleting relay before recreation",
+                    )
                     continue
                 except discord.HTTPException as exc:
-                    log.error("HTTP error recreating event in guild %s: %s", guild.id, exc)
+                    log.error(
+                        "HTTP error recreating event in guild %s: %s",
+                        guild.id,
+                        exc,
+                    )
+                    await self.bot.db.log_audit(
+                        "relay_update_failed",
+                        master_event_id=after.id,
+                        guild_id=guild.id,
+                        relay_event_id=relay_event.id,
+                        details=f"http error while deleting relay before recreation: {exc}",
+                    )
                     continue
+
                 await self.bot.db.delete_relay(after.id, guild.id)
                 await self.ensure_relay_for_target(guild, after)
                 await asyncio.sleep(0.5)
@@ -311,10 +497,35 @@ class RelayEvents(commands.Cog):
             try:
                 await relay_event.edit(**edit_kwargs)
                 log.info("Updated relay %s in guild %s", relay_event.id, guild.id)
+                await self.bot.db.log_audit(
+                    "relay_updated",
+                    master_event_id=after.id,
+                    guild_id=guild.id,
+                    relay_event_id=relay_event.id,
+                    details="updated mirrored relay event",
+                )
             except discord.Forbidden:
-                log.error("Missing permissions to edit event in guild %s", guild.id)
+                log.error(
+                    "Missing permissions to edit event in guild %s (%s)",
+                    guild.id,
+                    self._log_guild_permissions(guild),
+                )
+                await self.bot.db.log_audit(
+                    "relay_update_failed",
+                    master_event_id=after.id,
+                    guild_id=guild.id,
+                    relay_event_id=relay_event.id,
+                    details="forbidden while editing mirrored relay",
+                )
             except discord.HTTPException as exc:
                 log.error("HTTP error editing event in guild %s: %s", guild.id, exc)
+                await self.bot.db.log_audit(
+                    "relay_update_failed",
+                    master_event_id=after.id,
+                    guild_id=guild.id,
+                    relay_event_id=relay_event.id,
+                    details=f"http error while editing mirrored relay: {exc}",
+                )
 
             await asyncio.sleep(0.5)
 
@@ -340,15 +551,48 @@ class RelayEvents(commands.Cog):
                 )
                 await relay_event.delete()
                 log.info("Deleted relay %s in guild %s", row["relay_event_id"], guild.id)
+                await self.bot.db.log_audit(
+                    "relay_deleted",
+                    master_event_id=event.id,
+                    guild_id=guild.id,
+                    relay_event_id=int(row["relay_event_id"]),
+                    details="deleted mirrored relay event",
+                )
             except discord.NotFound:
                 log.warning(
                     "Relay event %s already gone in guild %s",
-                    row["relay_event_id"], guild.id,
+                    row["relay_event_id"],
+                    guild.id,
+                )
+                await self.bot.db.log_audit(
+                    "relay_missing",
+                    master_event_id=event.id,
+                    guild_id=guild.id,
+                    relay_event_id=int(row["relay_event_id"]),
+                    details="relay already gone before delete could be applied",
                 )
             except discord.Forbidden:
-                log.error("Missing permissions to delete event in guild %s", guild.id)
+                log.error(
+                    "Missing permissions to delete event in guild %s (%s)",
+                    guild.id,
+                    self._log_guild_permissions(guild),
+                )
+                await self.bot.db.log_audit(
+                    "relay_delete_failed",
+                    master_event_id=event.id,
+                    guild_id=guild.id,
+                    relay_event_id=int(row["relay_event_id"]),
+                    details="forbidden while deleting mirrored relay",
+                )
             except discord.HTTPException as exc:
                 log.error("HTTP error deleting event in guild %s: %s", guild.id, exc)
+                await self.bot.db.log_audit(
+                    "relay_delete_failed",
+                    master_event_id=event.id,
+                    guild_id=guild.id,
+                    relay_event_id=int(row["relay_event_id"]),
+                    details=f"http error while deleting mirrored relay: {exc}",
+                )
 
             await asyncio.sleep(0.5)
 

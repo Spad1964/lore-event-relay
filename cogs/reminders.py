@@ -15,6 +15,22 @@ class Reminders(commands.Cog):
         self.bot = bot
         self.reminder_task.start()
 
+    def _log_channel_permissions(
+        self,
+        channel: discord.abc.GuildChannel,
+    ) -> str:
+        me = channel.guild.me
+        if me is None:
+            return "bot member not cached"
+
+        perms = channel.permissions_for(me)
+        return (
+            f"view_channel={perms.view_channel}, "
+            f"send_messages={perms.send_messages}, "
+            f"embed_links={perms.embed_links}, "
+            f"attach_files={perms.attach_files}"
+        )
+
     def cog_unload(self) -> None:
         self.reminder_task.cancel()
 
@@ -123,13 +139,13 @@ class Reminders(commands.Cog):
                 embed.set_image(url=event.cover_image.url)
 
             embed.add_field(
-                name="Início",
+                name="Starts",
                 value=discord.utils.format_dt(event.start_time, style="F"),
                 inline=True,
             )
             if event.end_time:
                 embed.add_field(
-                    name="Fim",
+                    name="Ends",
                     value=discord.utils.format_dt(event.end_time, style="F"),
                     inline=True,
                 )
@@ -141,17 +157,43 @@ class Reminders(commands.Cog):
                 )
                 if mark_sent:
                     await self.bot.db.mark_reminded(master_event_id, int(row["guild_id"]))
+                await self.bot.db.log_audit(
+                    "reminder_sent",
+                    master_event_id=master_event_id,
+                    guild_id=int(row["guild_id"]),
+                    relay_event_id=int(row["relay_event_id"]),
+                    details=f"sent reminder to channel {channel.id}",
+                )
                 log.info(
                     "Sent reminder for event %s to guild %s",
                     master_event_id, row["guild_id"],
                 )
-            except discord.Forbidden:
+            except discord.Forbidden as exc:
                 log.error(
-                    "Missing permissions to send in channel %s",
+                    "Missing permissions to send in channel %s (%s): %s",
                     target_cfg.reminder_channel_id,
+                    self._log_channel_permissions(channel),
+                    exc,
+                )
+                await self.bot.db.log_audit(
+                    "reminder_failed",
+                    master_event_id=master_event_id,
+                    guild_id=int(row["guild_id"]),
+                    relay_event_id=int(row["relay_event_id"]),
+                    details=(
+                        f"forbidden while sending reminder to channel {channel.id}; "
+                        f"channel_perms={self._log_channel_permissions(channel)}"
+                    ),
                 )
             except discord.HTTPException as exc:
                 log.error("HTTP error sending reminder: %s", exc)
+                await self.bot.db.log_audit(
+                    "reminder_failed",
+                    master_event_id=master_event_id,
+                    guild_id=int(row["guild_id"]),
+                    relay_event_id=int(row["relay_event_id"]),
+                    details=f"http error while sending reminder: {exc}",
+                )
 
     @reminder_task.before_loop
     async def before_reminder(self) -> None:

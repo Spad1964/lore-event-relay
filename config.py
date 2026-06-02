@@ -62,7 +62,7 @@ class Config:
             event_name_prefix=data.get("event_name_prefix", "[RELAY] "),
             reminder_message=data.get(
                 "reminder_message",
-                "⏰ O evento **{event_name}** começa em 30 minutos! {mentions}",
+                "The event **{event_name}** starts in 5 minutes! {mentions}",
             ),
             reminder_minutes_before=reminder_minutes_before,
             log_level=data.get("log_level", "INFO"),
