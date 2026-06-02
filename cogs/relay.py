@@ -27,6 +27,20 @@ class RelayEvents(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
 
+    def _log_guild_permissions(self, guild: discord.Guild) -> str:
+        me = guild.me
+        if me is None:
+            return "bot member not cached"
+
+        perms = me.guild_permissions
+        return (
+            f"manage_events={perms.manage_events}, "
+            f"view_channel={perms.view_channel}, "
+            f"send_messages={perms.send_messages}, "
+            f"connect={perms.connect}, "
+            f"speak={perms.speak}"
+        )
+
     def is_master_event(self, event: discord.ScheduledEvent) -> bool:
         return event.guild_id == self.bot.config.master_guild_id
 
@@ -130,8 +144,13 @@ class RelayEvents(commands.Cog):
                 relay.id, target_guild.id, event.id,
             )
             return relay
-        except discord.Forbidden:
-            log.error("Missing Manage Events permission in guild %s", target_guild.id)
+        except discord.Forbidden as exc:
+            log.error(
+                "Forbidden creating relay in guild %s (%s): %s",
+                target_guild.id,
+                self._log_guild_permissions(target_guild),
+                exc,
+            )
         except discord.HTTPException as exc:
             log.error("HTTP error creating event in guild %s: %s", target_guild.id, exc)
         return None
