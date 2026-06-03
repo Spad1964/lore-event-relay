@@ -64,26 +64,12 @@ class Reminders(commands.Cog):
             if not (window_start <= event.start_time <= window_end):
                 continue
 
-            # Collect @mentions from master event subscribers
-            mentions: list[str] = []
-            try:
-                async for user in event.users():
-                    mentions.append(user.mention)
-            except Exception as exc:
-                log.warning(
-                    "Could not fetch participants for event %s: %s",
-                    master_event_id, exc,
-                )
-
-            mentions_str = " ".join(mentions)
-
-            await self._send_reminders(event, master_event_id, mentions_str, relay_rows)
+            await self._send_reminders(event, master_event_id, relay_rows)
 
     async def _send_reminders(
         self,
         event: discord.ScheduledEvent,
         master_event_id: int,
-        mentions_str: str,
         relay_rows: list[dict] | None = None,
         mark_sent: bool = True,
     ) -> None:
@@ -105,6 +91,29 @@ class Reminders(commands.Cog):
                     target_cfg.reminder_channel_id,
                 )
                 continue
+
+            mentions: list[str] = []
+            try:
+                relay_event = await channel.guild.fetch_scheduled_event(
+                    int(row["relay_event_id"])
+                )
+                async for user in relay_event.users():
+                    mentions.append(user.mention)
+            except discord.NotFound:
+                log.warning(
+                    "Relay event %s not found in guild %s while building reminder mentions",
+                    row["relay_event_id"],
+                    channel.guild.id,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Could not fetch participants for relay event %s in guild %s: %s",
+                    row["relay_event_id"],
+                    channel.guild.id,
+                    exc,
+                )
+
+            mentions_str = " ".join(mentions)
 
             content = self.bot.config.reminder_message.format(
                 event_name=event.name,

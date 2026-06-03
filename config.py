@@ -59,7 +59,7 @@ class Config:
         return cls(
             master_guild_id=int(raw_master),
             target_guilds=target_guilds,
-            event_name_prefix=data.get("event_name_prefix", "[RELAY] "),
+            event_name_prefix=data.get("event_name_prefix", "[PD] "),
             reminder_message=data.get(
                 "reminder_message",
                 "The event **{event_name}** starts in 5 minutes! {mentions}",

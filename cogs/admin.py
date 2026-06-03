@@ -399,17 +399,11 @@ class Admin(commands.Cog):
             )
             return
 
-        mentions: list[str] = []
-        try:
-            async for user in event.users():
-                mentions.append(user.mention)
-        except Exception as exc:
-            log.warning("Could not fetch participants: %s", exc)
-
+        relay_rows = await self.bot.db.get_relays_for_master(int(master_event_id))
         await reminder_cog._send_reminders(
             event,
             int(master_event_id),
-            " ".join(mentions),
+            relay_rows,
             mark_sent=False,
         )
         await interaction.followup.send("Reminder sent.", ephemeral=True)
