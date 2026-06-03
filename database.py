@@ -97,6 +97,23 @@ class Database:
             )
             await db.commit()
 
+    async def log_audit(
+        self,
+        action: str,
+        *,
+        master_event_id: int | None = None,
+        guild_id: int | None = None,
+        relay_event_id: int | None = None,
+        details: str | None = None,
+    ) -> None:
+        await self.record_audit(
+            action,
+            master_event_id=master_event_id,
+            guild_id=guild_id,
+            relay_event_id=relay_event_id,
+            details=details,
+        )
+
     async def mark_reminded(self, master_event_id: int, guild_id: int) -> None:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
