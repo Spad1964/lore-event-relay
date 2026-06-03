@@ -11,6 +11,7 @@ log = logging.getLogger(__name__)
 
 AUTO_REPAIR_MINUTES = 30
 _RELAY_LOCATION_FALLBACK = "See the master server"
+_RELAY_NAME_FALLBACK = "Classified Name"
 
 
 def _is_meaningful_update(
@@ -110,6 +111,16 @@ class RelayEvents(commands.Cog):
         if target_cfg is None:
             return set(DEFAULT_RELAY_FIELDS)
         return target_cfg.relay_field_set()
+
+    def _relay_event_name(
+        self,
+        target_guild_id: int,
+        event: discord.ScheduledEvent,
+    ) -> str:
+        relay_fields = self._relay_field_set(target_guild_id)
+        if "name" not in relay_fields:
+            return _RELAY_NAME_FALLBACK
+        return f"{self.bot.config.event_name_prefix}{event.name}"
 
     async def _complete_relay_event(
         self,
@@ -216,8 +227,8 @@ class RelayEvents(commands.Cog):
         target_guild: discord.Guild,
         event: discord.ScheduledEvent,
     ) -> Optional[discord.ScheduledEvent]:
-        name = f"{self.bot.config.event_name_prefix}{event.name}"
         relay_fields = self._relay_field_set(target_guild.id)
+        name = self._relay_event_name(target_guild.id, event)
 
         image_data: Optional[bytes] = None
         if "image" in relay_fields and event.cover_image:
@@ -574,7 +585,7 @@ class RelayEvents(commands.Cog):
                 continue
 
             edit_kwargs: dict = dict(
-                name=f"{self.bot.config.event_name_prefix}{after.name}",
+                name=self._relay_event_name(guild.id, after),
                 start_time=after.start_time,
             )
             if "description" in relay_fields:

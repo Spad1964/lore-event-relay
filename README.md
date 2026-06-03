@@ -50,7 +50,7 @@ log_level: "INFO"
 
 > `reminder_message` supports `{event_name}`, `{mentions}`, and `{minutes}`.
 
-> `relay_fields` lets you choose which optional master-event details are mirrored into a target relay. Supported values are `description`, `end_time`, `image`, and `location`. If omitted, all optional fields are mirrored. Required Discord fields such as the start time and relay channel/location are still kept as needed for the event type.
+> `relay_fields` lets you choose which event details are mirrored into a target relay. Supported values are `name`, `description`, `end_time`, `image`, and `location`. If `name` is omitted, the relay event title becomes `Classified Name`. If the setting is omitted entirely, all fields are mirrored. Required Discord fields such as the start time and relay channel/location are still kept as needed for the event type.
 
 ### 3. Install & run
 

@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEFAULT_RELAY_FIELDS = frozenset({"description", "end_time", "image", "location"})
+DEFAULT_RELAY_FIELDS = frozenset({"name", "description", "end_time", "image", "location"})
 
 
 def _validate_relay_fields(raw_fields: object, guild_id: int) -> list[str]:
