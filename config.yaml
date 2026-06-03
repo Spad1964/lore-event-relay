@@ -3,7 +3,6 @@ target_guilds:
   # - guild_id: "956715627589013576"
   #   reminder_channel_id: "1477819480049713324"
   #   relay_fields:
-  #     - description
   #     - image
   # Lore Actor Server
   - guild_id: "1374811059017486356"
@@ -15,7 +14,7 @@ target_guilds:
 event_name_prefix: "[PD] - "
 
 # {event_name}, {mentions}, and {minutes} are replaced at runtime
-reminder_minutes_before: 5
+reminder_minutes_before: 10
 reminder_message: "The event **{event_name}** starts in {minutes} minutes! {mentions}"
 
 log_level: "INFO"

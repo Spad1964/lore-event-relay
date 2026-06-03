@@ -47,7 +47,9 @@ log_level: "INFO"
 ```
 
 > `reminder_channel_id` is the text channel where the 30-min alert is sent. If omitted, no reminder is sent to that server.
+
 > `reminder_message` supports `{event_name}`, `{mentions}`, and `{minutes}`.
+
 > `relay_fields` lets you choose which optional master-event details are mirrored into a target relay. Supported values are `description`, `end_time`, `image`, and `location`. If omitted, all optional fields are mirrored. Required Discord fields such as the start time and relay channel/location are still kept as needed for the event type.
 
 ### 3. Install & run
