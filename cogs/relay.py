@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 
 AUTO_REPAIR_MINUTES = 30
 _RELAY_LOCATION_FALLBACK = "See the master server"
-_RELAY_NAME_FALLBACK = "Classified Name"
+_RELAY_NAME_FALLBACK = "[PD] - Help Needed"
 
 
 def _is_meaningful_update(
