@@ -5,9 +5,12 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
+from config import DEFAULT_RELAY_FIELDS
+
 log = logging.getLogger(__name__)
 
 AUTO_REPAIR_MINUTES = 30
+_RELAY_LOCATION_FALLBACK = "See the master server"
 
 
 def _is_meaningful_update(
@@ -102,6 +105,56 @@ class RelayEvents(commands.Cog):
         perms = channel.permissions_for(me)
         return perms.view_channel and perms.connect
 
+    def _relay_field_set(self, guild_id: int) -> set[str]:
+        target_cfg = self.bot.config.get_target_guild(guild_id)
+        if target_cfg is None:
+            return set(DEFAULT_RELAY_FIELDS)
+        return target_cfg.relay_field_set()
+
+    async def _complete_relay_event(
+        self,
+        guild: discord.Guild,
+        master_event_id: int,
+        relay_event: discord.ScheduledEvent,
+        relay_row: dict,
+    ) -> None:
+        try:
+            if relay_event.status is discord.EventStatus.active:
+                await relay_event.end()
+            else:
+                await relay_event.edit(status=discord.EventStatus.completed)
+
+            log.info("Ended relay %s in guild %s", relay_event.id, guild.id)
+            await self.bot.db.log_audit(
+                "relay_ended",
+                master_event_id=master_event_id,
+                guild_id=guild.id,
+                relay_event_id=relay_event.id,
+                details="ended mirrored relay event",
+            )
+        except discord.Forbidden:
+            log.error(
+                "Missing permissions to end event in guild %s (%s)",
+                guild.id,
+                self._log_guild_permissions(guild),
+            )
+            await self.bot.db.log_audit(
+                "relay_update_failed",
+                master_event_id=master_event_id,
+                guild_id=guild.id,
+                relay_event_id=relay_event.id,
+                details="forbidden while ending mirrored relay",
+            )
+        except discord.HTTPException as exc:
+            log.error("HTTP error ending event in guild %s: %s", guild.id, exc)
+            await self.bot.db.log_audit(
+                "relay_update_failed",
+                master_event_id=master_event_id,
+                guild_id=guild.id,
+                relay_event_id=relay_event.id,
+                details=f"http error while ending mirrored relay: {exc}",
+            )
+
     async def ensure_relay_for_target(
         self,
         target_guild: discord.Guild,
@@ -164,9 +217,10 @@ class RelayEvents(commands.Cog):
         event: discord.ScheduledEvent,
     ) -> Optional[discord.ScheduledEvent]:
         name = f"{self.bot.config.event_name_prefix}{event.name}"
+        relay_fields = self._relay_field_set(target_guild.id)
 
         image_data: Optional[bytes] = None
-        if event.cover_image:
+        if "image" in relay_fields and event.cover_image:
             try:
                 image_data = await event.cover_image.read()
             except Exception as exc:
@@ -178,15 +232,25 @@ class RelayEvents(commands.Cog):
 
         kwargs: dict = dict(
             name=name,
-            description=event.description or "",
             start_time=event.start_time,
-            end_time=event.end_time,
             privacy_level=discord.PrivacyLevel.guild_only,
             entity_type=event.entity_type,
         )
 
+        if "description" in relay_fields:
+            kwargs["description"] = event.description or ""
+
+        if event.end_time is not None and (
+            event.entity_type == discord.EntityType.external
+            or "end_time" in relay_fields
+        ):
+            kwargs["end_time"] = event.end_time
+
         if event.entity_type == discord.EntityType.external:
-            kwargs["location"] = event.location or "Ver servidor principal"
+            kwargs["location"] = (
+                event.location if "location" in relay_fields and event.location
+                else _RELAY_LOCATION_FALLBACK
+            )
         else:
             channel = self._find_matching_event_channel(target_guild, event)
             if channel is None:
@@ -195,9 +259,7 @@ class RelayEvents(commands.Cog):
                     target_guild.id,
                 )
                 kwargs["entity_type"] = discord.EntityType.external
-                kwargs["location"] = (
-                    f"#{event.channel.name}" if event.channel else "Watch primary server"
-                )
+                kwargs["location"] = _RELAY_LOCATION_FALLBACK
             else:
                 if not self._channel_is_usable(target_guild, channel):
                     log.warning(
@@ -207,9 +269,7 @@ class RelayEvents(commands.Cog):
                         self._log_channel_permissions(target_guild, channel),
                     )
                     kwargs["entity_type"] = discord.EntityType.external
-                    kwargs["location"] = (
-                        f"#{event.channel.name}" if event.channel else "Watch primary server"
-                    )
+                    kwargs["location"] = _RELAY_LOCATION_FALLBACK
                 else:
                     log.info(
                         "Using relay channel %s (%s) in guild %s",
@@ -400,17 +460,50 @@ class RelayEvents(commands.Cog):
     ) -> None:
         if not self.is_master_event(after):
             return
+        if after.status is discord.EventStatus.completed and before.status is not discord.EventStatus.completed:
+            relays = await self.bot.db.get_relays_for_master(after.id)
+            for row in relays:
+                guild = self.bot.get_guild(int(row["guild_id"]))
+                if not guild:
+                    continue
+
+                try:
+                    relay_event = await guild.fetch_scheduled_event(
+                        int(row["relay_event_id"])
+                    )
+                except discord.NotFound:
+                    log.warning(
+                        "Relay event %s gone from guild %s; removing from DB",
+                        row["relay_event_id"],
+                        guild.id,
+                    )
+                    await self.bot.db.delete_relay(after.id, guild.id)
+                    await self.bot.db.log_audit(
+                        "relay_missing",
+                        master_event_id=after.id,
+                        guild_id=guild.id,
+                        relay_event_id=int(row["relay_event_id"]),
+                        details="relay disappeared before completion could be applied",
+                    )
+                    continue
+
+                await self._complete_relay_event(guild, after.id, relay_event, row)
+                await asyncio.sleep(0.5)
+            return
+
         if not _is_meaningful_update(before, after):
             return
 
         log.info("Master event updated: %s (%s)", after.name, after.id)
 
         image_data: Optional[bytes] = None
+        image_fetch_failed = False
         if after.cover_image:
             try:
                 image_data = await after.cover_image.read()
             except Exception as exc:
                 log.warning("Could not fetch cover image: %s", exc)
+                image_fetch_failed = True
 
         relays = await self.bot.db.get_relays_for_master(after.id)
 
@@ -418,6 +511,8 @@ class RelayEvents(commands.Cog):
             guild = self.bot.get_guild(int(row["guild_id"]))
             if not guild:
                 continue
+
+            relay_fields = self._relay_field_set(guild.id)
 
             try:
                 relay_event = await guild.fetch_scheduled_event(
@@ -439,8 +534,7 @@ class RelayEvents(commands.Cog):
                 )
                 continue
 
-            cover_removed = before.cover_image is not None and after.cover_image is None
-            if cover_removed or relay_event.entity_type != after.entity_type:
+            if relay_event.entity_type != after.entity_type:
                 try:
                     await relay_event.delete()
                 except discord.NotFound:
@@ -481,18 +575,34 @@ class RelayEvents(commands.Cog):
 
             edit_kwargs: dict = dict(
                 name=f"{self.bot.config.event_name_prefix}{after.name}",
-                description=after.description or "",
                 start_time=after.start_time,
-                end_time=after.end_time,
             )
-            if after.entity_type == discord.EntityType.external:
-                edit_kwargs["location"] = after.location or "Watch primary server"
+            if "description" in relay_fields:
+                edit_kwargs["description"] = after.description or ""
             else:
+                edit_kwargs["description"] = ""
+
+            if after.entity_type == discord.EntityType.external:
+                edit_kwargs["location"] = (
+                    after.location if "location" in relay_fields and after.location
+                    else _RELAY_LOCATION_FALLBACK
+                )
+                edit_kwargs["end_time"] = after.end_time
+            else:
+                edit_kwargs["end_time"] = after.end_time if "end_time" in relay_fields else None
                 channel = self._find_matching_event_channel(guild, after)
                 if channel:
                     edit_kwargs["channel"] = channel
-            if image_data:
-                edit_kwargs["image"] = image_data
+
+            if "image" in relay_fields:
+                if image_fetch_failed:
+                    pass
+                else:
+                    edit_kwargs["image"] = (
+                        image_data if image_data is not None else None
+                    )
+            else:
+                edit_kwargs["image"] = None
 
             try:
                 await relay_event.edit(**edit_kwargs)

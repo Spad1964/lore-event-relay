@@ -2,9 +2,15 @@ target_guilds:
   # Staff Server
   # - guild_id: "956715627589013576"
   #   reminder_channel_id: "1477819480049713324"
+  #   relay_fields:
+  #     - description
+  #     - image
   # Lore Actor Server
   - guild_id: "1374811059017486356"
     reminder_channel_id: "1374814370256781442"
+    relay_fields:
+      - description
+      - image
 
 event_name_prefix: "[PD] - "
 

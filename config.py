@@ -7,11 +7,45 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DEFAULT_RELAY_FIELDS = frozenset({"description", "end_time", "image", "location"})
+
+
+def _validate_relay_fields(raw_fields: object, guild_id: int) -> list[str]:
+    if not isinstance(raw_fields, list):
+        raise ValueError(
+            f"relay_fields for target guild {guild_id} must be a list of strings"
+        )
+
+    fields: list[str] = []
+    seen_fields: set[str] = set()
+    for raw_field in raw_fields:
+        field = str(raw_field).strip().lower()
+        if not field:
+            continue
+        if field not in DEFAULT_RELAY_FIELDS:
+            allowed = ", ".join(sorted(DEFAULT_RELAY_FIELDS))
+            raise ValueError(
+                f"Unsupported relay field '{field}' for target guild {guild_id}; "
+                f"allowed values are: {allowed}"
+            )
+        if field in seen_fields:
+            continue
+        seen_fields.add(field)
+        fields.append(field)
+
+    return fields
+
 
 @dataclass
 class TargetGuild:
     guild_id: int
     reminder_channel_id: Optional[int]
+    relay_fields: Optional[list[str]] = None
+
+    def relay_field_set(self) -> set[str]:
+        if self.relay_fields is None:
+            return set(DEFAULT_RELAY_FIELDS)
+        return set(self.relay_fields)
 
 
 @dataclass
@@ -49,10 +83,19 @@ class Config:
                 if raw_guild.get("reminder_channel_id")
                 else None
             )
+
+            relay_fields = None
+            if "relay_fields" in raw_guild and raw_guild["relay_fields"] is not None:
+                relay_fields = _validate_relay_fields(
+                    raw_guild["relay_fields"],
+                    guild_id,
+                )
+
             target_guilds.append(
                 TargetGuild(
                     guild_id=guild_id,
                     reminder_channel_id=reminder_channel_id,
+                    relay_fields=relay_fields,
                 )
             )
 
