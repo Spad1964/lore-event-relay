@@ -93,6 +93,7 @@ class Reminders(commands.Cog):
                 continue
 
             mentions: list[str] = []
+            relay_event = None
             try:
                 relay_event = await channel.guild.fetch_scheduled_event(
                     int(row["relay_event_id"])
@@ -121,7 +122,7 @@ class Reminders(commands.Cog):
                 minutes=self.bot.config.reminder_minutes_before,
             ).strip()
 
-            # Build embed
+            # Build embed (master event primary)
             embed = discord.Embed(
                 title=event.name,
                 description=event.description or "",
@@ -132,21 +133,17 @@ class Reminders(commands.Cog):
                 text=f"Starts in {self.bot.config.reminder_minutes_before} minutes"
             )
 
-            # Link to the relay event in that guild
-            try:
-                relay_event = await channel.guild.fetch_scheduled_event(
-                    int(row["relay_event_id"])
-                )
+            # Link to the relay event in that guild (if available)
+            if relay_event is not None:
                 embed.url = (
                     f"https://discord.com/events/{channel.guild.id}/{relay_event.id}"
                 )
-            except discord.NotFound:
-                pass
 
             # Cover image from master event
             if event.cover_image:
                 embed.set_image(url=event.cover_image.url)
 
+            # Basic timing fields from master event
             embed.add_field(
                 name="Starts",
                 value=discord.utils.format_dt(event.start_time, style="F"),
@@ -158,6 +155,50 @@ class Reminders(commands.Cog):
                     value=discord.utils.format_dt(event.end_time, style="F"),
                     inline=True,
                 )
+
+            # Add relay/server-specific fields according to target guild's relay_fields
+            allowed = target_cfg.relay_field_set()
+            if relay_event is not None:
+                # Show relay event name if allowed
+                if "name" in allowed and getattr(relay_event, "name", None):
+                    embed.add_field(
+                        name="Server event",
+                        value=f"{relay_event.name} ({channel.guild.name})",
+                        inline=False,
+                    )
+
+                # Relay event location
+                if "location" in allowed and getattr(relay_event, "location", None):
+                    embed.add_field(
+                        name="Location",
+                        value=str(relay_event.location),
+                        inline=True,
+                    )
+
+                # Relay event end time
+                if "end_time" in allowed and getattr(relay_event, "end_time", None):
+                    embed.add_field(
+                        name="Server ends",
+                        value=discord.utils.format_dt(relay_event.end_time, style="F"),
+                        inline=True,
+                    )
+
+                # Relay event description
+                if "description" in allowed and getattr(relay_event, "description", None):
+                    # Truncate to 1000 chars to stay within embed limits
+                    desc = str(relay_event.description)[:1000]
+                    embed.add_field(
+                        name="Server description",
+                        value=desc,
+                        inline=False,
+                    )
+
+                # Relay event image as thumbnail
+                if "image" in allowed and getattr(relay_event, "cover_image", None):
+                    try:
+                        embed.set_thumbnail(url=relay_event.cover_image.url)
+                    except Exception:
+                        pass
 
             try:
                 await channel.send(
