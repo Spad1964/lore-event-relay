@@ -15,6 +15,32 @@ class Reminders(commands.Cog):
         self.bot = bot
         self.reminder_task.start()
 
+    def _relay_display_name(
+        self,
+        target_cfg,
+        event: discord.ScheduledEvent,
+        relay_event: discord.ScheduledEvent | None,
+    ) -> str:
+        if "name" in target_cfg.relay_field_set():
+            return relay_event.name if relay_event is not None else event.name
+
+        host_name = None
+        creator = getattr(event, "creator", None)
+        if creator and getattr(creator, "name", None):
+            host_name = creator.name
+        elif getattr(event, "creator_id", None) is not None and event.guild is not None:
+            member = event.guild.get_member(event.creator_id)
+            if member and getattr(member, "name", None):
+                host_name = member.name
+
+        if host_name:
+            return f"[PD] - Help Needed - {host_name}"
+
+        if relay_event is not None:
+            return relay_event.name
+
+        return event.name
+
     def _log_channel_permissions(
         self,
         channel: discord.abc.GuildChannel,
@@ -116,15 +142,17 @@ class Reminders(commands.Cog):
 
             mentions_str = " ".join(mentions)
 
+            display_event_name = self._relay_display_name(target_cfg, event, relay_event)
+
             content = self.bot.config.reminder_message.format(
-                event_name=event.name,
+                event_name=display_event_name,
                 mentions=mentions_str,
                 minutes=self.bot.config.reminder_minutes_before,
             ).strip()
 
             # Build embed (master event primary)
             embed = discord.Embed(
-                title=event.name,
+                title=display_event_name,
                 description=event.description or "",
                 color=discord.Color.orange(),
                 timestamp=event.start_time,

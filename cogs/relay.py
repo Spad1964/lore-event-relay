@@ -119,8 +119,34 @@ class RelayEvents(commands.Cog):
     ) -> str:
         relay_fields = self._relay_field_set(target_guild_id)
         if "name" not in relay_fields:
+            host_name = self._event_host_name(event)
+            if host_name:
+                return f"{_RELAY_NAME_FALLBACK} - {host_name}"
             return _RELAY_NAME_FALLBACK
         return f"{self.bot.config.event_name_prefix}{event.name}"
+
+    def _event_host_name(self, event: discord.ScheduledEvent) -> Optional[str]:
+        creator = getattr(event, "creator", None)
+        if creator and getattr(creator, "name", None):
+            return creator.name
+
+        creator_id = getattr(event, "creator_id", None)
+        if creator_id is None:
+            return None
+
+        guild = event.guild
+        if guild is None:
+            return None
+
+        member = guild.get_member(creator_id)
+        if member and getattr(member, "name", None):
+            return member.name
+
+        user = guild._state.get_user(creator_id)
+        if user and getattr(user, "name", None):
+            return user.name
+
+        return None
 
     async def _complete_relay_event(
         self,
