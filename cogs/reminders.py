@@ -41,6 +41,25 @@ class Reminders(commands.Cog):
 
         return event.name
 
+    def _event_host_name(self, event: discord.ScheduledEvent) -> str | None:
+        creator = getattr(event, "creator", None)
+        if creator and getattr(creator, "name", None):
+            return creator.name
+
+        creator_id = getattr(event, "creator_id", None)
+        if creator_id is None or event.guild is None:
+            return None
+
+        member = event.guild.get_member(creator_id)
+        if member and getattr(member, "name", None):
+            return member.name
+
+        user = event.guild._state.get_user(creator_id)
+        if user and getattr(user, "name", None):
+            return user.name
+
+        return None
+
     def _log_channel_permissions(
         self,
         channel: discord.abc.GuildChannel,
@@ -153,45 +172,18 @@ class Reminders(commands.Cog):
             # Build embed (master event primary)
             embed = discord.Embed(
                 title=display_event_name,
-                description=event.description or "",
                 color=discord.Color.orange(),
                 timestamp=event.start_time,
             )
-            embed.set_footer(
-                text=f"Starts in {self.bot.config.reminder_minutes_before} minutes"
-            )
 
-            # Link to the relay event in that guild (if available)
-            if relay_event is not None:
-                embed.url = (
-                    f"https://discord.com/events/{channel.guild.id}/{relay_event.id}"
-                )
-
-            # Cover image from master event
-            if event.cover_image:
-                embed.set_image(url=event.cover_image.url)
-
-            # Basic timing fields from master event
-            embed.add_field(
-                name="Starts",
-                value=discord.utils.format_dt(event.start_time, style="F"),
-                inline=True,
-            )
-            if event.end_time:
-                embed.add_field(
-                    name="Ends",
-                    value=discord.utils.format_dt(event.end_time, style="F"),
-                    inline=True,
-                )
-
-            # Add relay/server-specific fields according to target guild's relay_fields
+            # Add only relay/server-specific fields according to target guild's relay_fields
             allowed = target_cfg.relay_field_set()
             if relay_event is not None:
                 # Show relay event name if allowed
                 if "name" in allowed and getattr(relay_event, "name", None):
                     embed.add_field(
-                        name="Server event",
-                        value=f"{relay_event.name} ({channel.guild.name})",
+                        name="Event",
+                        value=relay_event.name,
                         inline=False,
                     )
 
@@ -206,7 +198,7 @@ class Reminders(commands.Cog):
                 # Relay event end time
                 if "end_time" in allowed and getattr(relay_event, "end_time", None):
                     embed.add_field(
-                        name="Server ends",
+                        name="Ends",
                         value=discord.utils.format_dt(relay_event.end_time, style="F"),
                         inline=True,
                     )
@@ -216,7 +208,7 @@ class Reminders(commands.Cog):
                     # Truncate to 1000 chars to stay within embed limits
                     desc = str(relay_event.description)[:1000]
                     embed.add_field(
-                        name="Server description",
+                        name="Description",
                         value=desc,
                         inline=False,
                     )
@@ -227,6 +219,11 @@ class Reminders(commands.Cog):
                         embed.set_thumbnail(url=relay_event.cover_image.url)
                     except Exception:
                         pass
+
+            if "name" not in allowed:
+                host_name = self._event_host_name(event)
+                if host_name:
+                    embed.add_field(name="Host", value=host_name, inline=True)
 
             try:
                 await channel.send(
