@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Optional
 
 import discord
@@ -12,6 +13,9 @@ log = logging.getLogger(__name__)
 AUTO_REPAIR_MINUTES = 30
 _RELAY_LOCATION_FALLBACK = "See the master server"
 _RELAY_NAME_FALLBACK = "[PD] - Help Needed"
+# External scheduled events require an end_time. When the master event lacks
+# one, fall back to this duration after the start time.
+_RELAY_DEFAULT_DURATION = timedelta(hours=1)
 
 
 def _is_meaningful_update(
@@ -315,6 +319,14 @@ class RelayEvents(commands.Cog):
                         target_guild.id,
                     )
                     kwargs["channel"] = channel
+
+        # External events (including channel-based events that fell back to
+        # external above) must have an end_time; supply one if missing.
+        if (
+            kwargs["entity_type"] == discord.EntityType.external
+            and "end_time" not in kwargs
+        ):
+            kwargs["end_time"] = event.start_time + _RELAY_DEFAULT_DURATION
 
         if image_data:
             kwargs["image"] = image_data
@@ -624,7 +636,10 @@ class RelayEvents(commands.Cog):
                     after.location if "location" in relay_fields and after.location
                     else _RELAY_LOCATION_FALLBACK
                 )
-                edit_kwargs["end_time"] = after.end_time
+                edit_kwargs["end_time"] = (
+                    after.end_time
+                    or after.start_time + _RELAY_DEFAULT_DURATION
+                )
             else:
                 edit_kwargs["end_time"] = after.end_time if "end_time" in relay_fields else None
                 channel = self._find_matching_event_channel(guild, after)
