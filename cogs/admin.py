@@ -400,13 +400,16 @@ class Admin(commands.Cog):
             return
 
         relay_rows = await self.bot.db.get_relays_for_master(int(master_event_id))
-        await reminder_cog._send_reminders(
+        sent_count = await reminder_cog._send_reminders(
             event,
             int(master_event_id),
             relay_rows,
             mark_sent=False,
         )
-        await interaction.followup.send("Reminder sent.", ephemeral=True)
+        await interaction.followup.send(
+            f"Reminder sent to **{sent_count}** target guild(s).",
+            ephemeral=True,
+        )
 
 
 async def setup(bot) -> None:

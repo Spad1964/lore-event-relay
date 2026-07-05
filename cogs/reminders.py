@@ -117,8 +117,9 @@ class Reminders(commands.Cog):
         master_event_id: int,
         relay_rows: list[dict] | None = None,
         mark_sent: bool = True,
-    ) -> None:
+    ) -> int:
         relays = relay_rows or await self.bot.db.get_relays_for_master(master_event_id)
+        sent_count = 0
 
         for row in relays:
             target_cfg = self.bot.config.get_target_guild(int(row["guild_id"]))
@@ -151,6 +152,9 @@ class Reminders(commands.Cog):
                     row["relay_event_id"],
                     channel.guild.id,
                 )
+                if mark_sent:
+                    await self.bot.db.mark_reminded(master_event_id, int(row["guild_id"]))
+                continue
             except Exception as exc:
                 log.warning(
                     "Could not fetch participants for relay event %s in guild %s: %s",
@@ -158,6 +162,24 @@ class Reminders(commands.Cog):
                     channel.guild.id,
                     exc,
                 )
+                continue
+
+            if not mentions:
+                log.info(
+                    "Skipped reminder for event %s in guild %s: no interested users",
+                    master_event_id,
+                    row["guild_id"],
+                )
+                if mark_sent:
+                    await self.bot.db.mark_reminded(master_event_id, int(row["guild_id"]))
+                await self.bot.db.log_audit(
+                    "reminder_skipped",
+                    master_event_id=master_event_id,
+                    guild_id=int(row["guild_id"]),
+                    relay_event_id=int(row["relay_event_id"]),
+                    details="no interested users",
+                )
+                continue
 
             mentions_str = " ".join(mentions)
 
@@ -243,6 +265,7 @@ class Reminders(commands.Cog):
                     "Sent reminder for event %s to guild %s",
                     master_event_id, row["guild_id"],
                 )
+                sent_count += 1
             except discord.Forbidden as exc:
                 log.error(
                     "Missing permissions to send in channel %s (%s): %s",
@@ -269,6 +292,8 @@ class Reminders(commands.Cog):
                     relay_event_id=int(row["relay_event_id"]),
                     details=f"http error while sending reminder: {exc}",
                 )
+
+        return sent_count
 
     @reminder_task.before_loop
     async def before_reminder(self) -> None:
