@@ -85,6 +85,8 @@ All commands require **Manage Server** permission and are only visible to you.
 | `/relay sync dry_run:true`    | Preview missing relays without creating them                      |
 | `/relay repair`               | Verify relay copies still exist and recreate missing ones         |
 | `/relay repair dry_run:true`  | Preview repairs without changing anything                         |
+| `/relay refresh`              | Preview deleting target events and rebuilding relays from master  |
+| `/relay refresh confirm:true dry_run:false` | Delete target events and recreate them from current master events |
 | `/relay cleanup`              | Remove database entries for events that no longer exist           |
 | `/relay cleanup dry_run:true` | Preview cleanup without deleting records                          |
 | `/relay health`               | Show bot, guild, and database health                              |

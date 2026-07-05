@@ -134,6 +134,14 @@ class Database:
             )
             await db.commit()
 
+    async def delete_relays_for_guild(self, guild_id: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "DELETE FROM event_relay WHERE guild_id = ?",
+                (str(guild_id),),
+            )
+            await db.commit()
+
     async def delete_relay(self, master_event_id: int, guild_id: int) -> None:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(

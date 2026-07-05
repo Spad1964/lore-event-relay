@@ -472,6 +472,191 @@ class RelayEvents(commands.Cog):
             log.info("Repair recreated %d missing relay(s)", repaired)
         return repaired
 
+    async def refresh_relays(self, *, dry_run: bool = False) -> dict[str, int]:
+        master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
+        if not master_guild:
+            log.warning("Master guild not found during refresh")
+            return {"deleted": 0, "created": 0, "failed": 0}
+
+        try:
+            master_events = await master_guild.fetch_scheduled_events()
+        except discord.HTTPException as exc:
+            log.error("Could not fetch master guild events during refresh: %s", exc)
+            return {"deleted": 0, "created": 0, "failed": 1}
+
+        active_master_events = [
+            event
+            for event in master_events
+            if event.status
+            not in (
+                discord.EventStatus.completed,
+                discord.EventStatus.cancelled,
+            )
+        ]
+
+        deleted = 0
+        created = 0
+        failed = 0
+        cleared_guild_ids: set[int] = set()
+
+        log.info(
+            "%s refresh across %d target guild(s) from %d master event(s)",
+            "Dry-run" if dry_run else "Starting",
+            len(self.bot.config.target_guilds),
+            len(active_master_events),
+        )
+
+        for target_cfg in self.bot.config.target_guilds:
+            target_guild = self.bot.get_guild(target_cfg.guild_id)
+            if not target_guild:
+                log.warning("Target guild %s not found during refresh", target_cfg.guild_id)
+                failed += 1
+                continue
+
+            try:
+                target_events = await target_guild.fetch_scheduled_events()
+            except discord.Forbidden:
+                log.error(
+                    "Missing permissions to fetch events in guild %s (%s)",
+                    target_guild.id,
+                    self._log_guild_permissions(target_guild),
+                )
+                await self.bot.db.log_audit(
+                    "relay_refresh_failed",
+                    guild_id=target_guild.id,
+                    details="forbidden while fetching target scheduled events",
+                )
+                failed += 1
+                continue
+            except discord.HTTPException as exc:
+                log.error(
+                    "HTTP error fetching events in guild %s during refresh: %s",
+                    target_guild.id,
+                    exc,
+                )
+                await self.bot.db.log_audit(
+                    "relay_refresh_failed",
+                    guild_id=target_guild.id,
+                    details=f"http error while fetching target scheduled events: {exc}",
+                )
+                failed += 1
+                continue
+
+            guild_failed = False
+            for target_event in target_events:
+                if target_event.status in (
+                    discord.EventStatus.completed,
+                    discord.EventStatus.cancelled,
+                ):
+                    continue
+
+                if dry_run:
+                    deleted += 1
+                    continue
+
+                try:
+                    await target_event.delete()
+                    deleted += 1
+                    log.info(
+                        "Deleted target event %s in guild %s during refresh",
+                        target_event.id,
+                        target_guild.id,
+                    )
+                    await self.bot.db.log_audit(
+                        "relay_refresh_deleted",
+                        guild_id=target_guild.id,
+                        relay_event_id=target_event.id,
+                        details="deleted target scheduled event during refresh",
+                    )
+                except discord.NotFound:
+                    pass
+                except discord.Forbidden:
+                    log.error(
+                        "Missing permissions to delete event in guild %s (%s)",
+                        target_guild.id,
+                        self._log_guild_permissions(target_guild),
+                    )
+                    await self.bot.db.log_audit(
+                        "relay_refresh_delete_failed",
+                        guild_id=target_guild.id,
+                        relay_event_id=target_event.id,
+                        details="forbidden while deleting target scheduled event",
+                    )
+                    failed += 1
+                    guild_failed = True
+                except discord.HTTPException as exc:
+                    log.error(
+                        "HTTP error deleting event %s in guild %s during refresh: %s",
+                        target_event.id,
+                        target_guild.id,
+                        exc,
+                    )
+                    await self.bot.db.log_audit(
+                        "relay_refresh_delete_failed",
+                        guild_id=target_guild.id,
+                        relay_event_id=target_event.id,
+                        details=f"http error while deleting target scheduled event: {exc}",
+                    )
+                    failed += 1
+                    guild_failed = True
+
+                await asyncio.sleep(0.5)
+
+            if not dry_run and not guild_failed:
+                cleared_guild_ids.add(target_guild.id)
+
+        if not dry_run:
+            for guild_id in cleared_guild_ids:
+                await self.bot.db.delete_relays_for_guild(guild_id)
+                await self.bot.db.log_audit(
+                    "relay_refresh_cleared",
+                    guild_id=guild_id,
+                    details="cleared relay database mappings during refresh",
+                )
+
+        for event in active_master_events:
+            for target_cfg in self.bot.config.target_guilds:
+                target_guild = self.bot.get_guild(target_cfg.guild_id)
+                if not target_guild:
+                    continue
+                if not dry_run and target_guild.id not in cleared_guild_ids:
+                    continue
+
+                if dry_run:
+                    created += 1
+                    continue
+
+                created_relay = await self.ensure_relay_for_target(
+                    target_guild,
+                    event,
+                )
+                if created_relay:
+                    created += 1
+                else:
+                    failed += 1
+
+                await asyncio.sleep(0.5)
+
+        if dry_run:
+            log.info(
+                "Dry-run refresh would delete %d event(s) and create %d relay(s)",
+                deleted,
+                created,
+            )
+        else:
+            log.info(
+                "Refresh finished: deleted=%d created=%d failed=%d",
+                deleted,
+                created,
+                failed,
+            )
+            await self.bot.db.log_audit(
+                "relay_refresh_finished",
+                details=f"deleted={deleted}; created={created}; failed={failed}",
+            )
+
+        return {"deleted": deleted, "created": created, "failed": failed}
+
     @tasks.loop(minutes=AUTO_REPAIR_MINUTES)
     async def auto_repair_task(self) -> None:
         await self.repair_missing_relays()

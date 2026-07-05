@@ -228,6 +228,66 @@ class Admin(commands.Cog):
             ephemeral=True,
         )
 
+    # ── /relay refresh ───────────────────────────────────────────────────────
+
+    @relay.command(
+        name="refresh",
+        description="Delete target events and recreate them from master events",
+    )
+    @app_commands.describe(
+        confirm="Required to delete events and rebuild relays",
+        dry_run="Preview the changes without deleting or creating events",
+    )
+    async def refresh(
+        self,
+        interaction: discord.Interaction,
+        confirm: bool = False,
+        dry_run: bool = True,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        if not dry_run and not confirm:
+            await interaction.followup.send(
+                "Refresh deletes scheduled events in every configured target guild. "
+                "Run `/relay refresh confirm:true dry_run:false` to continue.",
+                ephemeral=True,
+            )
+            return
+
+        master_guild = self.bot.get_guild(self.bot.config.master_guild_id)
+        if not master_guild:
+            await interaction.followup.send(
+                "Master guild not found.", ephemeral=True
+            )
+            return
+
+        relay_cog = self.bot.get_cog("RelayEvents")
+        if not relay_cog:
+            await interaction.followup.send(
+                "Relay cog not loaded.", ephemeral=True
+            )
+            return
+
+        result = await relay_cog.refresh_relays(dry_run=dry_run)
+
+        if dry_run:
+            await interaction.followup.send(
+                "Refresh dry-run: "
+                f"**{result['deleted']}** target event(s) would be deleted and "
+                f"**{result['created']}** relay(s) would be created. "
+                "Run `/relay refresh confirm:true dry_run:false` to apply it.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "Refresh finished: "
+            f"**{result['deleted']}** target event(s) deleted, "
+            f"**{result['created']}** relay(s) created, "
+            f"**{result['failed']}** failure(s).",
+            ephemeral=True,
+        )
+
     # ── /relay cleanup ───────────────────────────────────────────────────────
 
     @relay.command(
