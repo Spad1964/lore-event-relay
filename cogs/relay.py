@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 AUTO_REPAIR_MINUTES = 30
 _RELAY_LOCATION_FALLBACK = "See the master server"
-_RELAY_NAME_FALLBACK = "[PD] - Help Needed"
+_RELAY_NAME_FALLBACK = "[PD] Event"
 # External scheduled events require an end_time. When the master event lacks
 # one, fall back to this duration after the start time.
 _RELAY_DEFAULT_DURATION = timedelta(hours=1)
@@ -257,6 +257,15 @@ class RelayEvents(commands.Cog):
         target_guild: discord.Guild,
         event: discord.ScheduledEvent,
     ) -> Optional[discord.ScheduledEvent]:
+        if event.start_time <= datetime.now(timezone.utc):
+            log.info(
+                "Skipping relay for master event %s in guild %s: start time %s is in the past",
+                event.id,
+                target_guild.id,
+                event.start_time.isoformat(),
+            )
+            return None
+
         relay_fields = self._relay_field_set(target_guild.id)
         name = self._relay_event_name(target_guild.id, event)
 
