@@ -13,6 +13,12 @@ target_guilds:
       - image
       - location
       - name
+  # Media Team Server
+  - guild_id: "1523095563829248182"
+    reminder_channel_id: "1523096701257257132"
+    relay_fields:
+      - image
+      - location
 
 event_name_prefix: "[PD] - "
 

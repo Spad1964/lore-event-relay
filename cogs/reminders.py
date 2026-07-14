@@ -34,7 +34,7 @@ class Reminders(commands.Cog):
                 host_name = member.name
 
         if host_name:
-            return f"[PD] - Help Needed - {host_name}"
+            return f"[PD] - {host_name}"
 
         if relay_event is not None:
             return relay_event.name
